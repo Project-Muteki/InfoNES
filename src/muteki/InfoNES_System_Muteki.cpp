@@ -25,6 +25,7 @@
 #include <muteki/ui/common.h>
 #include <muteki/ui/canvas.h>
 #include <muteki/ui/event.h>
+#include <muteki/ui/surface.h>
 #include <muteki/ui/views/messagebox.h>
 
 #include "../InfoNES.h"
@@ -61,23 +62,12 @@ int last_millis = 0;
 short blit_offset_x = 0;
 short blit_offset_y = 0;
 short pressing0 = 0, pressing1 = 0;
+size_t xbound = 0;
+size_t bufbase = 0;
 
 auto old_hold_cfg = key_press_event_config_t();
 
-/*-------------------------------------------------------------------*/
-/*  Function prototypes ( Besta RTOS specific )                      */
-/*-------------------------------------------------------------------*/
-
-int LoadSRAM();
-int SaveSRAM();
-
-
-static void _ext_ticker();
-static void _direct_input_sim_begin();
-static void _direct_input_sim_end();
-static void _drain_all_events();
-static DWORD _map_pad_state(short key);
-static DWORD _map_pad_state_system(short key);
+lcd_surface_t *IntermediateSurface = nullptr, *RealSurface = nullptr;
 
 /* Palette data */
 WORD NesPalette[ 64 ] =
@@ -92,20 +82,19 @@ WORD NesPalette[ 64 ] =
   0x7f94, 0x73f4, 0x57d7, 0x5bf9, 0x4ffe, 0x0000, 0x0000, 0x0000
 };
 
-int FrameBufferRGB[NES_DISP_WIDTH * NES_DISP_HEIGHT] = {0};
+/*-------------------------------------------------------------------*/
+/*  Function prototypes ( Besta RTOS specific )                      */
+/*-------------------------------------------------------------------*/
 
-lcd_surface_t WorkSurface = {
-  {'P', 'X'},
-  NES_DISP_WIDTH,
-  NES_DISP_HEIGHT,
-  32,
-  NES_DISP_WIDTH * 4,
-  2,
-  nullptr,
-  FrameBufferRGB,
-};
+int LoadSRAM();
+int SaveSRAM();
 
-lcd_surface_t *LCDSurface = nullptr;
+static void _ext_ticker();
+static void _direct_input_sim_begin();
+static void _direct_input_sim_end();
+static void _drain_all_events();
+static DWORD _map_pad_state(short key);
+static DWORD _map_pad_state_system(short key);
 
 /*===================================================================*/
 /*                                                                   */
@@ -124,11 +113,29 @@ int main(int argc, char **argv)
 
   auto active_lcd = GetActiveLCD();
   if (active_lcd != nullptr) {
-    LCDSurface = GetActiveLCD()->surface;
+    RealSurface = GetActiveLCD()->surface;
     // TODO support and whitelist more buffer formats
-    if (LCDSurface != nullptr && LCDSurface->depth != 32) {
-      LCDSurface = nullptr;
+    if (RealSurface != nullptr && RealSurface->depth == LCD_SURFACE_PIXFMT_XRGB &&
+        RealSurface->width >= NES_DISP_WIDTH && RealSurface->height >= NES_DISP_HEIGHT) {
+      // Fast blit possible (XRGB hardware buffer format).
+      xbound = blit_offset_x + NES_DISP_WIDTH - 1;
+      bufbase = blit_offset_x + blit_offset_y * RealSurface->width;
+    } else {
+      // Fast blit not possible. Falling back to safe blit.
+      RealSurface = nullptr;
     }
+  }
+
+  if (RealSurface == nullptr) {
+    // Allocate intermediate surface
+    IntermediateSurface = reinterpret_cast<lcd_surface_t *>(
+      malloc(GetImageSizeExt(NES_DISP_WIDTH, NES_DISP_HEIGHT, LCD_SURFACE_PIXFMT_XRGB))
+    );
+    if (IntermediateSurface == nullptr) {
+      InfoNES_MessageBox("Failed to allocate memory for intermediate buffer.");
+      return 1;
+    }
+    InitGraphic(IntermediateSurface, NES_DISP_WIDTH, NES_DISP_HEIGHT, LCD_SURFACE_PIXFMT_XRGB);
   }
 
   strcpy(szRomName, ROM_FILE_NAME);
@@ -142,6 +149,11 @@ int main(int argc, char **argv)
   InfoNES_Main();
   SaveSRAM();
   _direct_input_sim_end();
+
+  if (IntermediateSurface != nullptr) {
+    free(IntermediateSurface);
+    IntermediateSurface = nullptr;
+  }
 
   return 0;
 }
@@ -614,14 +626,38 @@ void InfoNES_LoadFrame()
 {
   datetime_t dt;
 
-  for (size_t i = 0; i < NES_DISP_WIDTH * NES_DISP_HEIGHT; i++) {
-    FrameBufferRGB[i] = (
-      ((WorkFrame[i] & 0x001f) << 3) |
-      ((WorkFrame[i] & 0x03e0) << 6) |
-      ((WorkFrame[i] & 0x7c00) << 9)
-    );
+  if (RealSurface != nullptr) {
+    auto fb = reinterpret_cast<int *>(RealSurface->buffer);
+    auto xoff = blit_offset_x;
+    auto lineoff = bufbase;
+    auto bufoff = bufbase;
+    for (size_t i = 0; i < NES_DISP_WIDTH * NES_DISP_HEIGHT; i++) {
+      fb[bufoff] = (
+        ((WorkFrame[i] & 0x001f) << 3) |
+        ((WorkFrame[i] & 0x03e0) << 6) |
+        ((WorkFrame[i] & 0x7c00) << 9) |
+        0xff000000
+      );
+      if (xoff >= xbound) {
+        xoff = blit_offset_x;
+        lineoff += RealSurface->width;
+        bufoff = lineoff;
+      } else {
+        xoff++;
+        bufoff++;
+      }
+    }
+  } else if (IntermediateSurface != nullptr) {
+    auto fb = reinterpret_cast<int *>(IntermediateSurface->buffer);
+    for (size_t i = 0; i < NES_DISP_WIDTH * NES_DISP_HEIGHT; i++) {
+      fb[i] = (
+        ((WorkFrame[i] & 0x001f) << 3) |
+        ((WorkFrame[i] & 0x03e0) << 6) |
+        ((WorkFrame[i] & 0x7c00) << 9)
+      );
+    }
+    ShowGraphic(blit_offset_x, blit_offset_y, IntermediateSurface, BLIT_NONE);
   }
-  ShowGraphic(blit_offset_x, blit_offset_y, &WorkSurface, BLIT_NONE);
 
   // Calculate frame advance time
   short frame_advance = (FrameCnt % 3 == 0) ? 16 : 17;
