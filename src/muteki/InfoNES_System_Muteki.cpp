@@ -64,6 +64,7 @@ short blit_offset_y = 0;
 short pressing0 = 0, pressing1 = 0;
 size_t xbound = 0;
 size_t bufbase = 0;
+short frame_advance_cnt = 0;
 
 auto old_hold_cfg = key_press_event_config_t();
 
@@ -660,7 +661,11 @@ void InfoNES_LoadFrame()
   }
 
   // Calculate frame advance time
-  short frame_advance = (FrameCnt % 3 == 0) ? 16 : 17;
+  short frame_advance = (frame_advance_cnt == 0) ? 16 : 17;
+  frame_advance_cnt++;
+  if (frame_advance_cnt >= 3) {
+    frame_advance_cnt = 0;
+  }
 
   GetSysTime(&dt);
   short elapsed_millis = (dt.millis >= last_millis) ? (dt.millis - last_millis) : (1000 + dt.millis - last_millis);
