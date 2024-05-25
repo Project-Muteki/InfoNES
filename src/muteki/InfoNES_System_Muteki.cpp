@@ -21,6 +21,7 @@
 
 #include <muteki/datetime.h>
 #include <muteki/system.h>
+#include <muteki/utf16.h>
 #include <muteki/ui/common.h>
 #include <muteki/ui/canvas.h>
 #include <muteki/ui/event.h>
@@ -91,7 +92,7 @@ WORD NesPalette[ 64 ] =
   0x7f94, 0x73f4, 0x57d7, 0x5bf9, 0x4ffe, 0x0000, 0x0000, 0x0000
 };
 
-int WorkFrameRGB[NES_DISP_WIDTH * NES_DISP_HEIGHT] = {0};
+int FrameBufferRGB[NES_DISP_WIDTH * NES_DISP_HEIGHT] = {0};
 
 lcd_surface_t WorkSurface = {
   {'P', 'X'},
@@ -101,10 +102,10 @@ lcd_surface_t WorkSurface = {
   NES_DISP_WIDTH * 4,
   2,
   nullptr,
-  WorkFrameRGB,
+  FrameBufferRGB,
 };
 
-
+lcd_surface_t *LCDSurface = nullptr;
 
 /*===================================================================*/
 /*                                                                   */
@@ -120,6 +121,15 @@ int main(int argc, char **argv)
 
   blit_offset_x = (GetMaxScrX() + 1 - NES_DISP_WIDTH) / 2;
   blit_offset_y = (GetMaxScrY() + 1 - NES_DISP_HEIGHT) / 2;
+
+  auto active_lcd = GetActiveLCD();
+  if (active_lcd != nullptr) {
+    LCDSurface = GetActiveLCD()->surface;
+    // TODO support and whitelist more buffer formats
+    if (LCDSurface != nullptr && LCDSurface->depth != 32) {
+      LCDSurface = nullptr;
+    }
+  }
 
   strcpy(szRomName, ROM_FILE_NAME);
   if (InfoNES_Load(szRomName) == 0) {
@@ -605,7 +615,7 @@ void InfoNES_LoadFrame()
   datetime_t dt;
 
   for (size_t i = 0; i < NES_DISP_WIDTH * NES_DISP_HEIGHT; i++) {
-    WorkFrameRGB[i] = (
+    FrameBufferRGB[i] = (
       ((WorkFrame[i] & 0x001f) << 3) |
       ((WorkFrame[i] & 0x03e0) << 6) |
       ((WorkFrame[i] & 0x7c00) << 9)
@@ -696,15 +706,39 @@ void InfoNES_Wait() {}
 /*===================================================================*/
 void InfoNES_MessageBox( char *pszMsg, ... )
 {
-  char pszErr[ 1024 ];
   va_list args;
+  bool toggle_dis = dis_active;
+
+  auto pszErr = reinterpret_cast<char *>(calloc(1024, 1));
+  if (pszErr == nullptr) {
+    return;
+  }
+
+  auto pwszErr = reinterpret_cast<UTF16 *>(calloc(2048, 1));
+  if (pwszErr == nullptr) {
+    free(pszErr);
+    return;
+  }
 
   // Create the message body
   va_start( args, pszMsg );
   vsprintf( pszErr, pszMsg, args );  pszErr[ 1023 ] = '\0';
   va_end( args );
 
-  // TODO
+  ConvStrToUnicode(pszErr, pwszErr, MB_ENCODING_UTF8);
+
+  if (toggle_dis) {
+    _direct_input_sim_end();
+  }
+
+  MessageBox(pwszErr, MB_DEFAULT);
+
+  if (toggle_dis) {
+    _direct_input_sim_begin();
+  }
+
+  free(pszErr);
+  free(pwszErr);
 }
 
 /*
