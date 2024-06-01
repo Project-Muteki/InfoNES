@@ -19,7 +19,9 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 
+#include <muteki/audio.h>
 #include <muteki/datetime.h>
+#include <muteki/devio.h>
 #include <muteki/system.h>
 #include <muteki/utf16.h>
 #include <muteki/ui/common.h>
@@ -66,6 +68,13 @@ size_t xbound = 0;
 size_t bufbase = 0;
 short frame_advance_cnt = 0;
 
+pcm_codec_context_t *pcmdesc = nullptr;
+devio_descriptor_t *pcmdev = DEVIO_DESC_INVALID;
+
+int pcm_sample_rate = -1;
+short audio_buffer[0x1000] = {0};
+size_t audio_pos = 0;
+
 auto old_hold_cfg = key_press_event_config_t();
 
 lcd_surface_t *IntermediateSurface = nullptr, *RealSurface = nullptr;
@@ -96,6 +105,8 @@ static void _direct_input_sim_end();
 static void _drain_all_events();
 static DWORD _map_pad_state(short key);
 static DWORD _map_pad_state_system(short key);
+static int sound_on();
+static void sound_off();
 
 /*===================================================================*/
 /*                                                                   */
@@ -106,11 +117,21 @@ static DWORD _map_pad_state_system(short key);
 /* Application main */
 int main(int argc, char **argv)
 {
+  // Boot with APU muted by default
+  // TODO make this configurable once we get a UI
+  APU_Mute = 1;
+
   rgbSetBkColor(0);
   ClearScreen(false);
 
   blit_offset_x = (GetMaxScrX() + 1 - NES_DISP_WIDTH) / 2;
   blit_offset_y = (GetMaxScrY() + 1 - NES_DISP_HEIGHT) / 2;
+  if (blit_offset_x < 0) {
+    blit_offset_x = 0;
+  }
+  if (blit_offset_y < 0) {
+    blit_offset_y = 0;
+  }
 
   auto active_lcd = GetActiveLCD();
   if (active_lcd != nullptr) {
@@ -446,6 +467,36 @@ static inline DWORD _map_pad_state(short key) {
   }
 }
 
+static int sound_on() {
+  sound_off();
+
+  pcmdesc = OpenPCMCodec(DIRECTION_OUT, pcm_sample_rate, FORMAT_PCM_MONO);
+  if (pcmdesc == nullptr) {
+    return 0;
+  }
+
+  pcmdev = CreateFile("\\\\?\\PCM", 0, 0, NULL, 3, 0, NULL);
+  if (pcmdev == nullptr || pcmdev == DEVIO_DESC_INVALID) {
+    ClosePCMCodec(pcmdesc);
+    pcmdesc = nullptr;
+    return 0;
+  }
+
+  return 1;
+}
+
+static void sound_off() {
+  if (pcmdev != nullptr && pcmdev != DEVIO_DESC_INVALID) {
+    CloseHandle(pcmdev);
+    pcmdev = DEVIO_DESC_INVALID;
+  }
+
+  if (pcmdesc != nullptr) {
+    ClosePCMCodec(pcmdesc);
+    pcmdesc = nullptr;
+  }
+}
+
 /*===================================================================*/
 /*                                                                   */
 /*                  InfoNES_Menu() : Menu screen                     */
@@ -657,6 +708,7 @@ void InfoNES_LoadFrame()
         ((WorkFrame[i] & 0x7c00) << 9)
       );
     }
+    // TODO maybe use _BitBlt to write to the LCD buffer so we can center the image regardless of whether blit_offset_* is negative or not
     ShowGraphic(blit_offset_x, blit_offset_y, IntermediateSurface, BLIT_NONE);
   }
 
@@ -685,8 +737,20 @@ void InfoNES_LoadFrame()
 /*===================================================================*/
 void InfoNES_PadState( DWORD *pdwPad1, DWORD *pdwPad2, DWORD *pdwSystem )
 {
+  static bool holding_m = false;
   *pdwPad1 = _map_pad_state(pressing0) | _map_pad_state(pressing1);
   *pdwSystem = _map_pad_state_system(pressing0) | _map_pad_state(pressing1);
+  if ((pressing0 == KEY_M || pressing1 == KEY_M) && !holding_m) {
+    holding_m = true;
+    APU_Mute ^= 1;
+    if (APU_Mute == 0) {
+      sound_on();
+    } else {
+      sound_off();
+    }
+  } else if (pressing0 != KEY_M && pressing1 != KEY_M) {
+    holding_m = false;
+  }
   if (*pdwSystem & PAD_SYS_QUIT) {
     quit = true;
   }
@@ -699,7 +763,7 @@ void InfoNES_PadState( DWORD *pdwPad1, DWORD *pdwPad2, DWORD *pdwSystem )
 /*===================================================================*/
 void InfoNES_SoundInit( void ) 
 {
-  // TODO
+  return;
 }
 
 /*===================================================================*/
@@ -709,8 +773,14 @@ void InfoNES_SoundInit( void )
 /*===================================================================*/
 int InfoNES_SoundOpen( int samples_per_sync, int sample_rate ) 
 {
-  // TODO
-  return 1;
+  (void) samples_per_sync;
+
+  pcm_sample_rate = sample_rate;
+
+  if (APU_Mute == 1) {
+    return 1;
+  }
+  return sound_on();
 }
 
 /*===================================================================*/
@@ -720,7 +790,7 @@ int InfoNES_SoundOpen( int samples_per_sync, int sample_rate )
 /*===================================================================*/
 void InfoNES_SoundClose( void ) 
 {
-  // TODO
+  sound_off();
 }
 
 /*===================================================================*/
@@ -730,7 +800,19 @@ void InfoNES_SoundClose( void )
 /*===================================================================*/
 void InfoNES_SoundOutput( int samples, BYTE *wave1, BYTE *wave2, BYTE *wave3, BYTE *wave4, BYTE *wave5 )
 {
-  // TODO
+  size_t actual_size;
+
+  for (int i = 0; i < samples; i++) {
+    audio_buffer[audio_pos++] = (
+      ((wave1[i] + wave2[i] + wave3[i] + wave4[i] + wave5[i]) / 5 - 128) * 256
+    );
+    if (audio_pos >= sizeof(audio_buffer) / sizeof(audio_buffer[0])) {
+      if (pcmdev != nullptr && pcmdev != DEVIO_DESC_INVALID) {
+        WriteFile(pcmdev, audio_buffer, sizeof(audio_buffer), &actual_size, nullptr);
+      }
+      audio_pos = 0;
+    }
+  }
 }
 
 /*===================================================================*/

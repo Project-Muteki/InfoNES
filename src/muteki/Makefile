@@ -29,7 +29,7 @@ InfoNES.exe: InfoNES.elf
 
 # To avoid the gcc optimization bug
 ./../InfoNES_pAPU.o: ./../InfoNES_pAPU.cpp
-	$(CC) $(INCLUDES) -c $(CCFLAGS_NOOPT) ./../InfoNES_pAPU.cpp -o ./../InfoNES_pAPU.o 
+	$(CC) $(INCLUDES) -c $(CCFLAGS) ./../InfoNES_pAPU.cpp -o ./../InfoNES_pAPU.o
 
 .cpp.o:
 	$(CC) $(INCLUDES) -c $(CCFLAGS) $*.cpp  -o $@
