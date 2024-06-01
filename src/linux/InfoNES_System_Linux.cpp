@@ -1099,7 +1099,7 @@ void InfoNES_Wait() {}
 /*            InfoNES_MessageBox() : Print System Message            */
 /*                                                                   */
 /*===================================================================*/
-void InfoNES_MessageBox( char *pszMsg, ... )
+void InfoNES_MessageBox( const char *pszMsg, ... )
 {
   char pszErr[ 1024 ];
   va_list args;

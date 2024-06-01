@@ -669,6 +669,6 @@ void InfoNES_SoundOutput(int samples, BYTE *wave1, BYTE *wave2, BYTE *wave3, BYT
 }
 
 /* Print system message */
-void InfoNES_MessageBox(char *pszMsg, ...){}
+void InfoNES_MessageBox(const char *pszMsg, ...){}
 
 /* End of InfoNES_System_SDL.cpp */

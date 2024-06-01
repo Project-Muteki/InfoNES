@@ -470,6 +470,8 @@ static inline DWORD _map_pad_state(short key) {
 static int sound_on() {
   sound_off();
 
+  audio_pos = 0;
+
   pcmdesc = OpenPCMCodec(DIRECTION_OUT, pcm_sample_rate, FORMAT_PCM_MONO);
   if (pcmdesc == nullptr) {
     return 0;
@@ -740,6 +742,9 @@ void InfoNES_PadState( DWORD *pdwPad1, DWORD *pdwPad2, DWORD *pdwSystem )
   static bool holding_m = false;
   *pdwPad1 = _map_pad_state(pressing0) | _map_pad_state(pressing1);
   *pdwSystem = _map_pad_state_system(pressing0) | _map_pad_state(pressing1);
+  if (*pdwSystem & PAD_SYS_QUIT) {
+    quit = true;
+  }
   if ((pressing0 == KEY_M || pressing1 == KEY_M) && !holding_m) {
     holding_m = true;
     APU_Mute ^= 1;
@@ -750,9 +755,6 @@ void InfoNES_PadState( DWORD *pdwPad1, DWORD *pdwPad2, DWORD *pdwSystem )
     }
   } else if (pressing0 != KEY_M && pressing1 != KEY_M) {
     holding_m = false;
-  }
-  if (*pdwSystem & PAD_SYS_QUIT) {
-    quit = true;
   }
 }
 
@@ -827,7 +829,7 @@ void InfoNES_Wait() {}
 /*            InfoNES_MessageBox() : Print System Message            */
 /*                                                                   */
 /*===================================================================*/
-void InfoNES_MessageBox( char *pszMsg, ... )
+void InfoNES_MessageBox( const char *pszMsg, ... )
 {
   va_list args;
   bool toggle_dis = dis_active;

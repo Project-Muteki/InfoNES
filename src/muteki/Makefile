@@ -15,8 +15,8 @@ TARBALL = InfoNES097J
 #CCFLAGS_NOOPT = `gtk-config --cflags` -O0
 #LDFLAGS = `gtk-config --libs gthread` -lstdc++		# gcc3.x.x
 
-CCFLAGS = -O3 -pipe -std=c++11
-CCFLAGS_NOOPT = -O0 -pipe -std=c++11
+CCFLAGS = -Wall -O3 -pipe -std=c++11
+CCFLAGS_NOOPT = -Wall -O0 -pipe -std=c++11
 LDFLAGS = -lstdc++			# gcc3.x.x
 
 all: InfoNES.exe
