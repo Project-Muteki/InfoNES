@@ -29,6 +29,7 @@
 #include <muteki/ui/event.h>
 #include <muteki/ui/surface.h>
 #include <muteki/ui/views/messagebox.h>
+#include <muteki/ui/views/filepicker.h>
 
 #include "../InfoNES.h"
 #include "../InfoNES_System.h"
@@ -38,8 +39,8 @@
 /*  ROM image file information                                       */
 /*-------------------------------------------------------------------*/
 
-char szRomName[ 256 ];
-char szSaveName[ 256 ];
+char szRomName[ 260 ];
+char szSaveName[ 260 ];
 int nSRAM_SaveFlag;
 
 /*-------------------------------------------------------------------*/
@@ -121,6 +122,43 @@ int main(int argc, char **argv)
   // TODO make this configurable once we get a UI
   APU_Mute = 1;
 
+  filepicker_context_t ctx = {0};
+  void *paths = FILEPICKER_CONTEXT_OUTPUT_ALLOC(calloc, 1, true);
+  if (paths == NULL) {
+    return 1;
+  }
+  auto *path = reinterpret_cast<UTF16 *>(calloc(260, 2));
+  if (path == NULL) {
+    free(paths);
+    return 1;
+  }
+
+  ctx.paths = paths;
+  ctx.ctx_size = sizeof(ctx);
+  ctx.unk_0x30 = 0xffff;
+  ctx.type_list = "NES ROM Files (*.nes)\0*.nes\0All Files (*.*)\0*.*\0\0\0";
+
+  bool ret = _GetOpenFileName(&ctx);
+
+  if (!ret || _GetNextFileName(&ctx, path) != 0) {
+    free(paths);
+    free(path);
+    return 0;
+  }
+
+  // TODO get a proper wc2mb to work here
+  for (size_t i = 0; i < sizeof(szRomName); i++) {
+    if (path[i] > 0xff) {
+      free(paths);
+      free(path);
+      return 1;
+    }
+    szRomName[i] = path[i] & 0xff;
+  }
+
+  free(paths);
+  free(path);
+
   rgbSetBkColor(0);
   ClearScreen(false);
 
@@ -160,7 +198,6 @@ int main(int argc, char **argv)
     InitGraphic(IntermediateSurface, NES_DISP_WIDTH, NES_DISP_HEIGHT, LCD_SURFACE_PIXFMT_XRGB);
   }
 
-  strcpy(szRomName, ROM_FILE_NAME);
   if (InfoNES_Load(szRomName) == 0) {
     LoadSRAM();
   } else {
