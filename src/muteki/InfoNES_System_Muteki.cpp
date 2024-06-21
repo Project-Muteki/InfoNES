@@ -759,7 +759,7 @@ void InfoNES_LoadFrame()
 
   if (RealSurface != nullptr) {
     auto fb = reinterpret_cast<int *>(RealSurface->buffer);
-    auto xoff = blit_offset_x;
+    size_t xoff = blit_offset_x & 0x7fff;
     auto lineoff = bufbase;
     auto bufoff = bufbase;
     for (size_t i = 0; i < NES_DISP_WIDTH * NES_DISP_HEIGHT; i++) {
