@@ -17,7 +17,7 @@ TARBALL = InfoNES097J
 
 CCFLAGS = -Wall -O3 -pipe -std=c++11
 CCFLAGS_NOOPT = -Wall -O0 -pipe -std=c++11
-LDFLAGS = -lstdc++			# gcc3.x.x
+LDFLAGS = -lstdc++ -lmutekix			# gcc3.x.x
 
 all: InfoNES.exe
 

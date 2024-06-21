@@ -31,6 +31,8 @@
 #include <muteki/ui/views/messagebox.h>
 #include <muteki/ui/views/filepicker.h>
 
+#include <mutekix/threading.h>
+
 #include "../InfoNES.h"
 #include "../InfoNES_System.h"
 #include "../InfoNES_pAPU.h"
@@ -48,7 +50,6 @@ int nSRAM_SaveFlag;
 /*-------------------------------------------------------------------*/
 
 #define VERSION      "InfoNES v0.96J"
-const char ROM_FILE_NAME[] = "rom.nes";
 
 const key_press_event_config_t KEY_EVENT_CONFIG_DRAIN = {65535, 65535, 1};
 const key_press_event_config_t KEY_EVENT_CONFIG_TURBO = {0, 0, 0};
@@ -59,7 +60,7 @@ const key_press_event_config_t KEY_EVENT_CONFIG_TURBO = {0, 0, 0};
 
 /* Quit flag */
 bool quit = false;
-bool dis_active = false;
+volatile bool dis_active = false;
 
 int last_millis = 0;
 short blit_offset_x = 0;
@@ -79,6 +80,10 @@ size_t audio_pos = 0;
 auto old_hold_cfg = key_press_event_config_t();
 
 lcd_surface_t *IntermediateSurface = nullptr, *RealSurface = nullptr;
+
+volatile int tim1_emulator_running = false;
+event_t *tim1_shutdown_ack = nullptr;
+thread_t *tim1_worker_inst = nullptr;
 
 /* Palette data */
 WORD NesPalette[ 64 ] =
@@ -108,6 +113,12 @@ static DWORD _map_pad_state(short key);
 static DWORD _map_pad_state_system(short key);
 static int sound_on();
 static void sound_off();
+static int _tim1_emulator_worker(void *);
+
+static mutekix_thread_arg_t tim1_worker_arg = {
+  .func = &_tim1_emulator_worker,
+  .user_data = nullptr,
+};
 
 /*===================================================================*/
 /*                                                                   */
@@ -124,11 +135,11 @@ int main(int argc, char **argv)
 
   filepicker_context_t ctx = {0};
   void *paths = FILEPICKER_CONTEXT_OUTPUT_ALLOC(calloc, 1, true);
-  if (paths == NULL) {
+  if (paths == nullptr) {
     return 1;
   }
   auto *path = reinterpret_cast<UTF16 *>(calloc(260, 2));
-  if (path == NULL) {
+  if (path == nullptr) {
     free(paths);
     return 1;
   }
@@ -261,7 +272,7 @@ int LoadSRAM()
 
   // Open SRAM file
   fp = fopen( szSaveName, "rb" );
-  if ( fp == NULL )
+  if ( fp == nullptr )
     return -1;
 
   // Read SRAM data
@@ -398,7 +409,7 @@ int SaveSRAM()
 
   // Open SRAM file
   fp = fopen( szSaveName, "wb" );
-  if ( fp == NULL )
+  if ( fp == nullptr )
     return -1;
 
   // Write SRAM data
@@ -416,6 +427,22 @@ static inline bool _test_events_no_shift(ui_event_t *uievent) {
     // This means we need to handle shift behavior ourselves (if we really need it) but that's a fair tradeoff.
     SetShiftState(TOGGLE_KEY_INACTIVE);
     return TestPendEvent(uievent) || TestKeyEvent(uievent);
+}
+
+static int _tim1_emulator_worker(void *user_data) {
+  (void) user_data;
+
+  OSResetEvent(tim1_shutdown_ack);
+
+  tim1_emulator_running = true;
+
+  while (tim1_emulator_running) {
+    _ext_ticker();
+    OSSleep(30);
+  }
+  OSSetEvent(tim1_shutdown_ack);
+
+  return 0;
 }
 
 static void _ext_ticker() {
@@ -456,8 +483,12 @@ static void _drain_all_events() {
 static void _direct_input_sim_begin() {
   if (!dis_active) {
     GetSysKeyState(&old_hold_cfg);
-    SetTimer1IntHandler(&_ext_ticker, 3);
+
+    tim1_shutdown_ack = OSCreateEvent(true, 1);
+    tim1_worker_inst = OSCreateThread(&mutekix_thread_wrapper, &tim1_worker_arg, 16384, false);
+
     SetSysKeyState(&KEY_EVENT_CONFIG_TURBO);
+    OSSleep(1);
     dis_active = true;
   }
 }
@@ -465,7 +496,16 @@ static void _direct_input_sim_begin() {
 static void _direct_input_sim_end() {
   if (dis_active) {
     SetSysKeyState(&KEY_EVENT_CONFIG_DRAIN);
-    SetTimer1IntHandler(NULL, 0);
+
+    tim1_emulator_running = false;
+    while (OSWaitForEvent(tim1_shutdown_ack, 1000) != WAIT_RESULT_RESOLVED) {};
+    OSCloseEvent(tim1_shutdown_ack);
+    OSSleep(1);
+    if (tim1_worker_inst != nullptr) {
+      OSTerminateThread(tim1_worker_inst, 0);
+      tim1_worker_inst = nullptr;
+    }
+
     _drain_all_events();
     SetSysKeyState(&old_hold_cfg);
     dis_active = false;
@@ -514,7 +554,7 @@ static int sound_on() {
     return 0;
   }
 
-  pcmdev = CreateFile("\\\\?\\PCM", 0, 0, NULL, 3, 0, NULL);
+  pcmdev = CreateFile("\\\\?\\PCM", 0, 0, nullptr, 3, 0, nullptr);
   if (pcmdev == nullptr || pcmdev == DEVIO_DESC_INVALID) {
     ClosePCMCodec(pcmdesc);
     pcmdesc = nullptr;
@@ -583,7 +623,7 @@ int InfoNES_ReadRom( const char *pszFileName )
 
   /* Open ROM file */
   fp = fopen( pszFileName, "rb" );
-  if ( fp == NULL )
+  if ( fp == nullptr )
     return -1;
 
   /* Read ROM Header */
@@ -641,13 +681,13 @@ void InfoNES_ReleaseRom()
   if ( ROM )
   {
     free( ROM );
-    ROM = NULL;
+    ROM = nullptr;
   }
 
   if ( VROM )
   {
     free( VROM );
-    VROM = NULL;
+    VROM = nullptr;
   }
 }
 
@@ -766,6 +806,7 @@ void InfoNES_LoadFrame()
     OSSleep(sleep_millis);
   }
 
+  GetSysTime(&dt);
   last_millis = dt.millis;
 }
 
