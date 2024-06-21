@@ -74,16 +74,25 @@ pcm_codec_context_t *pcmdesc = nullptr;
 devio_descriptor_t *pcmdev = DEVIO_DESC_INVALID;
 
 int pcm_sample_rate = -1;
-short audio_buffer[0x1000] = {0};
+int pcm_samples_per_sync = 0;
 size_t audio_pos = 0;
 
 auto old_hold_cfg = key_press_event_config_t();
 
 lcd_surface_t *IntermediateSurface = nullptr, *RealSurface = nullptr;
 
-volatile int tim1_emulator_running = false;
+volatile bool tim1_emulator_running = false;
 event_t *tim1_shutdown_ack = nullptr;
 thread_t *tim1_worker_inst = nullptr;
+
+bool sound_is_on = false;
+volatile BYTE audio_buffer_consumer_offset;
+volatile BYTE audio_buffer_producer_offset;
+volatile bool audio_running = false;
+thread_t *audio_worker_inst = nullptr;
+event_t *audio_shutdown_ack = nullptr;
+
+short *audio_buffer = nullptr;
 
 /* Palette data */
 WORD NesPalette[ 64 ] =
@@ -114,6 +123,12 @@ static DWORD _map_pad_state_system(short key);
 static int sound_on();
 static void sound_off();
 static int _tim1_emulator_worker(void *);
+static int _audio_worker(void *user_data);
+
+static mutekix_thread_arg_t audio_worker_arg = {
+  .func = &_audio_worker,
+  .user_data = NULL,
+};
 
 static mutekix_thread_arg_t tim1_worker_arg = {
   .func = &_tim1_emulator_worker,
@@ -429,22 +444,6 @@ static inline bool _test_events_no_shift(ui_event_t *uievent) {
     return TestPendEvent(uievent) || TestKeyEvent(uievent);
 }
 
-static int _tim1_emulator_worker(void *user_data) {
-  (void) user_data;
-
-  OSResetEvent(tim1_shutdown_ack);
-
-  tim1_emulator_running = true;
-
-  while (tim1_emulator_running) {
-    _ext_ticker();
-    OSSleep(30);
-  }
-  OSSetEvent(tim1_shutdown_ack);
-
-  return 0;
-}
-
 static void _ext_ticker() {
   static auto uievent = ui_event_t();
   bool hit = false;
@@ -544,35 +543,99 @@ static inline DWORD _map_pad_state(short key) {
   }
 }
 
-static int sound_on() {
-  sound_off();
+static int _audio_worker(void *user_data) {
+  (void) user_data;
 
-  audio_pos = 0;
+  OSResetEvent(audio_shutdown_ack);
+
+  audio_running = true;
+
+  size_t actual_size;
+  pcm_codec_context_t *pcmdesc = nullptr;
+  devio_descriptor_t *pcmdev = DEVIO_DESC_INVALID;
 
   pcmdesc = OpenPCMCodec(DIRECTION_OUT, pcm_sample_rate, FORMAT_PCM_MONO);
   if (pcmdesc == nullptr) {
+    audio_running = false;
     return 0;
   }
 
-  pcmdev = CreateFile("\\\\?\\PCM", 0, 0, nullptr, 3, 0, nullptr);
+  pcmdev = CreateFile("\\\\?\\PCM", 0, 0, NULL, 3, 0, NULL);
   if (pcmdev == nullptr || pcmdev == DEVIO_DESC_INVALID) {
     ClosePCMCodec(pcmdesc);
-    pcmdesc = nullptr;
+    audio_running = false;
     return 0;
   }
 
-  return 1;
-}
+  while (audio_running) {
+    BYTE cbuf = audio_buffer_consumer_offset;
+    size_t cbuf_offset = pcm_samples_per_sync * cbuf;
+    if (cbuf != audio_buffer_producer_offset) {
+      WriteFile(pcmdev, &audio_buffer[cbuf_offset], pcm_samples_per_sync * 2, &actual_size, nullptr);
+      cbuf++;
+      cbuf &= 3;
+      audio_buffer_consumer_offset = cbuf;
+    } else {
+      /* Yield from thread for more audio data. */
+      OSSleep(1);
+    }
+  }
 
-static void sound_off() {
   if (pcmdev != nullptr && pcmdev != DEVIO_DESC_INVALID) {
     CloseHandle(pcmdev);
     pcmdev = DEVIO_DESC_INVALID;
   }
-
   if (pcmdesc != nullptr) {
     ClosePCMCodec(pcmdesc);
     pcmdesc = nullptr;
+  }
+
+  OSSetEvent(audio_shutdown_ack);
+
+  return 0;
+}
+
+static int _tim1_emulator_worker(void *user_data) {
+  (void) user_data;
+
+  OSResetEvent(tim1_shutdown_ack);
+
+  tim1_emulator_running = true;
+
+  while (tim1_emulator_running) {
+    _ext_ticker();
+    OSSleep(30);
+  }
+  OSSetEvent(tim1_shutdown_ack);
+
+  return 0;
+}
+
+static int sound_on() {
+  if (!sound_is_on) {
+    audio_buffer_consumer_offset = 0;
+    audio_buffer_producer_offset = 0;
+    memset(audio_buffer, 0, pcm_samples_per_sync * 4 * 2);
+    audio_shutdown_ack = OSCreateEvent(true, 1);
+    audio_worker_inst = OSCreateThread(&mutekix_thread_wrapper, &audio_worker_arg, 16384, false);
+    OSSleep(1);
+    sound_is_on = true;
+    return true;
+  }
+  return false;
+}
+
+static void sound_off() {
+  if (sound_is_on) {
+    audio_running = false;
+    while (OSWaitForEvent(audio_shutdown_ack, 1000) != WAIT_RESULT_RESOLVED) {};
+    OSCloseEvent(audio_shutdown_ack);
+    OSSleep(1);
+    if (audio_worker_inst != nullptr) {
+      OSTerminateThread(audio_worker_inst, 0);
+      audio_worker_inst = nullptr;
+    }
+    sound_is_on = false;
   }
 }
 
@@ -853,8 +916,12 @@ void InfoNES_SoundInit( void )
 /*===================================================================*/
 int InfoNES_SoundOpen( int samples_per_sync, int sample_rate ) 
 {
-  (void) samples_per_sync;
+  audio_buffer = reinterpret_cast<short *>(calloc(4 * samples_per_sync, 2));
+  if (audio_buffer == nullptr) {
+    return 0;
+  }
 
+  pcm_samples_per_sync = samples_per_sync;
   pcm_sample_rate = sample_rate;
 
   if (APU_Mute == 1) {
@@ -871,6 +938,9 @@ int InfoNES_SoundOpen( int samples_per_sync, int sample_rate )
 void InfoNES_SoundClose( void ) 
 {
   sound_off();
+  if (audio_buffer != nullptr) {
+    free(audio_buffer);
+  }
 }
 
 /*===================================================================*/
@@ -880,17 +950,18 @@ void InfoNES_SoundClose( void )
 /*===================================================================*/
 void InfoNES_SoundOutput( int samples, BYTE *wave1, BYTE *wave2, BYTE *wave3, BYTE *wave4, BYTE *wave5 )
 {
-  size_t actual_size;
-
-  for (int i = 0; i < samples; i++) {
-    audio_buffer[audio_pos++] = (
-      ((wave1[i] + wave2[i] + wave3[i] + wave4[i] + wave5[i]) / 5 - 128) * 256
-    );
-    if (audio_pos >= sizeof(audio_buffer) / sizeof(audio_buffer[0])) {
-      if (pcmdev != nullptr && pcmdev != DEVIO_DESC_INVALID) {
-        WriteFile(pcmdev, audio_buffer, sizeof(audio_buffer), &actual_size, nullptr);
+  if (sound_is_on) {
+    BYTE pbuf = audio_buffer_producer_offset;
+    size_t pbuf_offset = pcm_samples_per_sync * pbuf;
+    if (((pbuf + 1) & 3) != audio_buffer_consumer_offset) {
+      for (int i = 0; i < samples; i++) {
+        audio_buffer[pbuf_offset + i] = (
+          ((wave1[i] + wave2[i] + wave3[i] + wave4[i] + wave5[i]) / 5 - 128) * 256
+        );
       }
-      audio_pos = 0;
+      pbuf++;
+      pbuf &= 3;
+      audio_buffer_producer_offset = pbuf;
     }
   }
 }
